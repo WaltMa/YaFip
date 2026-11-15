@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+# 锚定根目录：运行时产物只在仓库根级的 data/ 与 logs/，
+# 避免无锚定模式误吞任意层级同名目录（如 src/yafip/data/）
+/data/
+/logs/
+*.db
+*.db-wal
+*.db-shm
+web/vendor/*.map
+.DS_Store
+comate
