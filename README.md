@@ -1,6 +1,6 @@
 # YaFip
 
-**Yet Another Financial Independence Platform** —— 本地运行的量化数据底座：多市场（A股/港股/美股）日 K + 复权因子 + 白名单 + 人工触发的任务系统。面向优质标的的日 K 波段决策，**不做实盘、不做日内高频**；策略训练与简单回测为后续规划（未实现）。
+**Yet Another Financial Independence Platform** —— 本地运行的量化系统：多市场（A股/港股/美股）日 K + 复权因子 + 白名单 + 人工触发的任务系统。面向优质标的的日 K 波段决策，**不做实盘、不做日内高频**；策略训练与简单回测为后续规划（未实现）。
 
 > 当前代码为多市场量化数据底座（初版）。AI 协作规则见 `AGENTS.md`（Claude 等自动读取 `CLAUDE.md`）；架构/红线/数据源见 `docs/ARCHITECTURE.md`、`docs/INVARIANTS.md`、`docs/DATA_SOURCES.md`。
 
