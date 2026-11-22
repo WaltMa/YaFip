@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from typing import Any
 
@@ -30,6 +31,8 @@ from yafip.data.base import (
     normalize_date,
 )
 from yafip.data.market import MARKET_CN_A, MARKET_HK, MARKET_US
+
+logger = logging.getLogger("yafip")
 
 # US 日历骨架：新浪仅支持 4 大指数；VIX 无接口本期不注册
 US_CAL_INDEX = ".INX"
@@ -49,7 +52,7 @@ class AkshareSource(DataSource):
     name = "akshare"
 
     # -- 标的列表（元数据） -------------------------------------------------
-    def get_stock_list(self, market: str, include_delisted: bool = True) -> pd.DataFrame:
+    def get_stock_list(self, market: str) -> pd.DataFrame:
         ak = _import_ak()
         if market == MARKET_HK:
             df = ak.stock_hk_spot_sina()
@@ -120,9 +123,16 @@ class AkshareSource(DataSource):
         return df
 
     def _daily_for_symbols(self, market: str, symbols: list[str], start: str, end: str) -> pd.DataFrame:
-        """按 symbol 逐个拉取日 K 并合并（akshare 无按日的批量接口）。"""
+        """按 symbol 逐个拉取日 K 并合并（akshare 无按日的批量接口）。
+
+        单标的失败只跳过该标的（退市/改代码不阻断整日，避免 HK/US 增量卡死在同一水位）；
+        失败清单经 `df.attrs["failed_symbols"]` 随结果传出（DataFrame.attrs 无共享状态、
+        并发安全），供 fetcher 写入任务结果——否则失败标的缺失会静默永久化。
+        全部失败时返回空表（也带 attrs），由 fetcher 按“空结果”判当日失败。
+        """
         ak = _import_ak()
         frames: list[pd.DataFrame] = []
+        failed_symbols: list[dict] = []
         for symbol in symbols:
             try:
                 if market == MARKET_HK:
@@ -131,27 +141,38 @@ class AkshareSource(DataSource):
                 else:  # US
                     raw = ak.stock_us_hist_sina(symbol=str(symbol), period="daily", adjust="")
             except Exception as exc:  # noqa: BLE001 - 单标的失败不阻断
-                raise DataSourceError(f"akshare 日K获取失败（{market}:{symbol}）：{exc}") from exc
+                failed_symbols.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+                continue
             if raw is None or raw.empty:
+                failed_symbols.append({"symbol": symbol, "error": "返回空"})
                 continue
             temp = raw.copy()
             temp["ts_code"] = symbol  # 源侧契约：日K以 ts_code 标识标的
             temp["trade_date"] = temp["date"].map(normalize_date)
-            temp = temp[(temp["trade_date"] >= start) & (temp["trade_date"] <= end)]
             temp["vol"] = temp["volume"]  # akshare 列名为 volume（股）
-            temp["pre_close"] = None
             if "amount" not in temp.columns:
                 temp["amount"] = None
             # 过滤非交易日的 NaN 占位行（新浪美股数据含非交易日期，close 为空）
-            before = len(temp)
-            temp = temp[temp["close"].notna()]
-            if len(temp) < before:
-                temp = temp.copy()
+            temp = temp[temp["close"].notna()].copy()
+            # pre_close 用前一日收盘（Sina 无该列；历史序列完整，跨区间边界也正确）
+            temp = temp.sort_values("trade_date")
+            temp["pre_close"] = temp["close"].shift(1)
+            temp = temp[(temp["trade_date"] >= start) & (temp["trade_date"] <= end)]
             frames.append(temp[["ts_code", "trade_date", "open", "high", "low", "close",
                                 "pre_close", "vol", "amount"]])
+        if failed_symbols:
+            logger.warning(
+                "akshare 日K %s 个标的失败（已跳过，不中断整日）：%s",
+                len(failed_symbols),
+                "; ".join(f"{f['symbol']}（{f['error']}）" for f in failed_symbols)[:500],
+            )
         if not frames:
-            return pd.DataFrame(columns=DAILY_COLUMNS)
-        return pd.concat(frames, ignore_index=True)
+            empty = pd.DataFrame(columns=DAILY_COLUMNS)
+            empty.attrs["failed_symbols"] = failed_symbols
+            return empty
+        result = pd.concat(frames, ignore_index=True)
+        result.attrs["failed_symbols"] = failed_symbols
+        return result
 
     # -- 复权因子（HK/US：无，NONE/1.0 由 fetcher 写占位） ------------------
     def get_adj_factor(self, market: str, trade_date: str) -> pd.DataFrame:

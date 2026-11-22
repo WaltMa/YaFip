@@ -6,6 +6,12 @@
   const React = window.React;
   const dayjs = window.dayjs;
 
+  const MARKET_UNITS = {
+    CN_A: { vol: "手", amount: "千元" },
+    HK: { vol: "股", amount: "港元" },
+    US: { vol: "股", amount: "美元" },
+  };
+
   function Explore() {
     const [market, setMarket] = React.useState("CN_A");
     const [options, setOptions] = React.useState([]);
@@ -14,6 +20,16 @@
     const [priceType, setPriceType] = React.useState("raw");
     const [rows, setRows] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
+    const canAdj = market === "CN_A";
+    const units = MARKET_UNITS[market] || MARKET_UNITS.CN_A;
+
+    // HK/US 无复权因子：切到非 A 股市场时强制回原始价
+    React.useEffect(
+      function () {
+        if (!canAdj && priceType !== "raw") setPriceType("raw");
+      },
+      [canAdj, priceType]
+    );
 
     async function search(keyword) {
       if (!keyword) return;
@@ -75,8 +91,8 @@
       { title: "前收", dataIndex: "pre_close", render: num },
       { title: "涨跌", dataIndex: "change", render: num },
       { title: "涨跌幅%", dataIndex: "pct_chg", render: num },
-      { title: "成交量(手)", dataIndex: "vol", render: Y.fmt.num },
-      { title: "成交额(千元)", dataIndex: "amount", render: Y.fmt.num },
+      { title: "成交量(" + units.vol + ")", dataIndex: "vol", render: Y.fmt.num },
+      { title: "成交额(" + units.amount + ")", dataIndex: "amount", render: Y.fmt.num },
       { title: "复权因子", dataIndex: "adj_factor", render: (v) => (v === null || v === undefined ? "-" : Number(v).toFixed(4)) },
     ];
 
@@ -113,14 +129,26 @@
             <${antd.Segmented}
               value=${priceType}
               onChange=${setPriceType}
-              options=${[
-                { label: "原始", value: "raw" },
-                { label: "前复权", value: "qfq" },
-                { label: "后复权", value: "hfq" },
-              ]}
+              options=${canAdj
+                ? [
+                    { label: "原始", value: "raw" },
+                    { label: "前复权", value: "qfq" },
+                    { label: "后复权", value: "hfq" },
+                  ]
+                : [{ label: "原始", value: "raw" }]}
             />
           <//>
         <//>
+
+        ${!canAdj
+          ? html`<${antd.Alert}
+              style=${{ marginBottom: 16 }}
+              type="info"
+              showIcon
+              message="该市场无复权因子，仅提供原始价"
+              description="HK/US 本期不折算分红送股，前复权/后复权与原始价相同，故仅显示原始口径。"
+            />`
+          : null}
 
         <${antd.Alert}
           style=${{ marginBottom: 16 }}

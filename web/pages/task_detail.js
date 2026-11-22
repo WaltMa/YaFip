@@ -148,8 +148,8 @@
                         ${result.dates_done !== undefined
                           ? html`<${antd.Card} size="small"><${antd.Statistic} title="完成" value=${result.dates_done} /><//>`
                           : null}
-                        ${result.dates_skipped !== undefined
-                          ? html`<${antd.Card} size="small"><${antd.Statistic} title="跳过" value=${result.dates_skipped} /><//>`
+                        ${result.dates_reused !== undefined
+                          ? html`<${antd.Card} size="small"><${antd.Statistic} title="复用" value=${result.dates_reused} /><//>`
                           : null}
                         ${result.dates_failed !== undefined
                           ? html`<${antd.Card} size="small"><${antd.Statistic} title="失败" value=${result.dates_failed} valueStyle=${{ color: result.dates_failed ? "#cf1322" : undefined }} /><//>`

@@ -6,7 +6,7 @@ import pytest
 from conftest import FakeContext, FakeSource, make_db, seed_calendar
 
 from yafip.config import ConfigService
-from yafip.data.base import ADJ_COLUMNS, DAILY_COLUMNS
+from yafip.data.base import ADJ_COLUMNS, CALENDAR_COLUMNS, DAILY_COLUMNS
 from yafip.data.fetcher import Fetcher
 from yafip.data.market import MARKET_CN_A
 from yafip.data.repository import Repository
@@ -133,18 +133,20 @@ def test_empty_adj_keeps_daily_but_failed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(source, "get_adj_factor", empty_adj_for_0103)
     first = fetcher.run(FakeContext("t1"), {"market": MARKET, "mode": "incremental", "end": "2025-01-06"})
-    # daily 已入库但单元记失败（等待补齐因子）
+    # 因子缺失日（01-03）整日回退：bars 也不入库（修复前 bars 先落库形成半截数据、复权价错误）；
+    # 正常日 01-02/01-06 照常提交 → 6 行
     assert first["dates_failed"] == 1
-    assert repo.bar_count() == 9
+    assert repo.bar_count() == 6
     assert repo.adj_count() == 6
     assert repo.sync_state_watermark(MARKET) is None
 
     monkeypatch.undo()
     second = fetcher.run(FakeContext("t2"), {"market": MARKET, "mode": "incremental", "end": "2025-01-06"})
     assert second["dates_total"] == 3
-    assert second["dates_done"] == 1   # 复用已 applied 的两天，仅重抓 01-03 补因子
+    assert second["dates_done"] == 1   # 正常日已 applied 复用，01-03 整日（bars+adj）重抓补齐
     assert second["dates_reused"] == 2
     assert second["dates_failed"] == 0
+    assert repo.bar_count() == 9
     assert repo.adj_count() == 9
     assert repo.sync_state_watermark(MARKET) == "2025-01-06"
 
@@ -469,8 +471,10 @@ def test_adj_missing_keeps_qfq_hfq_rows(tmp_path):
         )
         rows = repo.daily_query(MARKET, symbol, "2020-01-01", "2020-01-31", price_type="qfq")
         assert len(rows) == 3
-        assert [r["close"] for r in rows] == [5.0, 10.0, 10.0]
-        assert [r["adj_factor"] for r in rows] == [1.0, 2.0, 2.0]
+        # 缺因子日（01-03）前向填充为前一日因子 1.0：close=10*1.0/2.0=5.0，
+        # 而不是用最新因子 2.0 兜底出 10.0（那会把缺因子日误当除权日，制造伪跳空）
+        assert [r["close"] for r in rows] == [5.0, 5.0, 10.0]
+        assert [r["adj_factor"] for r in rows] == [1.0, 1.0, 2.0]
     finally:
         db.close_all()
 
@@ -571,3 +575,53 @@ def test_purge_stale_scoped_to_scan_range(tmp_path):
     repo.insert_issues([])
     repo.purge_stale_issues(check, MARKET, "2025-01-01", "2025-12-31")
     assert repo.db.scalar("SELECT COUNT(*) FROM data_quality_issue") == 0
+
+
+class CountingCalendarSource(FakeSource):
+    """记录日历调用次数，并按指定开市日返回源侧日历。"""
+
+    def __init__(self, calendar_dates: list[str]):
+        self.calendar_dates = calendar_dates
+        self.calendar_calls: list[tuple[str, str, str]] = []
+
+    def get_calendar(self, market: str, start: str, end: str) -> pd.DataFrame:
+        self.calendar_calls.append((market, start, end))
+        return pd.DataFrame(
+            [
+                {"exchange": "SSE", "cal_date": day, "is_open": 1, "pretrade_date": None}
+                for day in self.calendar_dates if start <= day <= end
+            ],
+            columns=CALENDAR_COLUMNS,
+        )
+
+
+def test_calendar_hole_refetches_full_window(tmp_path):
+    """首尾覆盖但中间大段缺失（1/2 → 3/1，58 天）→ 整窗重拉并补齐。"""
+    db, config, repo, whitelist, fetcher = build(tmp_path)
+    db.execute("DELETE FROM trade_calendar WHERE market=?", (MARKET,))
+    seed_calendar(db, MARKET, ["2025-01-02", "2025-03-01"])
+    assert repo.calendar_count(MARKET) == 2
+
+    source = CountingCalendarSource(["2025-01-02", "2025-01-20", "2025-02-10", "2025-03-01"])
+    fetcher.source = source
+    ctx = FakeContext("cal-gap")
+    fetcher._ensure_calendar(ctx, MARKET, "2025-01-02", "2025-03-01")
+
+    assert source.calendar_calls == [(MARKET, "2025-01-02", "2025-03-01")]
+    assert repo.open_dates(MARKET, "2025-01-02", "2025-03-01") == source.calendar_dates
+    assert any("空洞" in message for _level, message in ctx.logs)
+
+
+def test_dense_calendar_does_not_refetch(tmp_path):
+    """覆盖完整且最大间隔 <= MAX_CAL_GAP_DAYS → 不调用数据源。"""
+    db, config, repo, whitelist, fetcher = build(tmp_path)
+    db.execute("DELETE FROM trade_calendar WHERE market=?", (MARKET,))
+    seed_calendar(db, MARKET, ["2025-01-01", "2025-01-20", "2025-02-10"])
+
+    source = CountingCalendarSource(["2025-01-01", "2025-01-20", "2025-02-10"])
+    fetcher.source = source
+    ctx = FakeContext("cal-dense")
+    fetcher._ensure_calendar(ctx, MARKET, "2025-01-01", "2025-02-10")
+
+    assert source.calendar_calls == []
+    assert repo.open_dates(MARKET, "2025-01-01", "2025-02-10") == ["2025-01-01", "2025-01-20", "2025-02-10"]

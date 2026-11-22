@@ -15,18 +15,29 @@
   // ---------------------------------------------------------------------
   // params_schema 渲染器：驱动动态参数表单
   // ---------------------------------------------------------------------
-  function FieldControl({ field, form }) {
+  function FieldControl(props) {
+    // Form.Item 会向子组件注入 value/onChange，必须透传给底层控件，
+    // 否则值进不了表单 store，必填校验永远不通过。
+    const field = props.field;
     const t = field.type;
+    const value = props.value;
+    const onChange = props.onChange;
     if (t === "number") {
       return html`<${antd.InputNumber}
         style=${{ width: "100%" }}
         min=${field.min}
         step=${field.step || 1}
         placeholder=${field.help || ""}
+        value=${value}
+        onChange=${onChange}
       />`;
     }
     if (t === "date") {
-      return html`<${antd.DatePicker} style=${{ width: "100%" }} />`;
+      return html`<${antd.DatePicker}
+        style=${{ width: "100%" }}
+        value=${value}
+        onChange=${onChange}
+      />`;
     }
     if (t === "symbol_list") {
       return html`<${antd.Select}
@@ -34,17 +45,21 @@
         tokenSeparators=${[",", " "]}
         placeholder=${field.help || "输入 symbol 后回车（如 600519.SH）"}
         open=${false}
+        value=${value || []}
+        onChange=${onChange}
       />`;
     }
     if (t === "enum") {
       return html`<${antd.Select}
         style=${{ width: "100%" }}
+        value=${value}
+        onChange=${onChange}
         options=${(field.options || []).map(function (value) {
           return { value: value, label: value };
         })}
       />`;
     }
-    return html`<${antd.Input} placeholder=${field.help || ""} />`;
+    return html`<${antd.Input} placeholder=${field.help || ""} value=${value} onChange=${onChange} />`;
   }
 
   function ParamsForm({ schema, form }) {
@@ -192,6 +207,16 @@
           message="提交前请确认白名单已就绪"
           description="日 K 增量/区间任务按白名单过滤；白名单为空时任务直接拒绝。元数据 / 市值指标需先跑 meta.sync_all，白名单规则读表更新。"
         />
+
+        ${market === "CN_A" && taskType && taskType.indexOf("meta.") === 0
+          ? html`<${antd.Alert}
+              style=${{ marginBottom: 16 }}
+              type="info"
+              showIcon
+              message="A 股元数据只收录当前上市股票"
+              description="meta 任务通过 stock_basic 只拉取一次 list_status='L'（当前上市），不含退市/暂停上市：低积分账号该接口常被限到 1 次/小时，L/D/P 分段拉取无法在单个任务内完成；退市/暂停上市待「分段抓取+断点落库」机制完善后再放开。"
+            />`
+          : null}
 
         <${antd.Card}>
           <${antd.Space} direction="vertical" size=${16} style=${{ width: "100%" }}>

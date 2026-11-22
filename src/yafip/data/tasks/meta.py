@@ -6,13 +6,22 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from yafip.config import ConfigService
 from yafip.data.base import DataSource, DataSourceError, FatalDataSourceError
-from yafip.data.market import MARKET_CN_A, MarketError, infer_asset_type, normalize_symbol, require_market
+from yafip.data.market import (
+    MARKET_CN_A,
+    MARKET_HK,
+    MARKET_US,
+    MarketError,
+    infer_asset_type,
+    normalize_symbol,
+    require_market,
+)
 from yafip.data.repository import Repository
 from yafip.data.staging import (
     DATASET_META,
@@ -103,14 +112,50 @@ def _sync(
     task_type = str(params.get("task_type") or "meta.sync_all")
     executor_name = str(params.get("executor") or f"{source.name}.{task_type}")
 
+    # kill 后重跑复用：同 task_type/executor 遗留的 validated 单元直接提交，不再请求数据源。
+    # 只复用 validated（applied 表示已完成，重跑必须全量刷新避免陈旧）；
+    # CN_A 需 instrument+metric 齐备才复用，HK/US 仅 instrument。
+    # symbols 过滤（I-11）：meta.sync_symbols 按标的集合全等隔离，防止复用他人标的的单元。
+    reuse = [
+        u for u in staging.reusable_units(
+            DATASET_META, market,
+            kinds=(KIND_INSTRUMENT, KIND_METRIC),
+            task_type=task_type, executor=executor_name, symbols=symbols,
+        )
+        if u["status"] == "validated"
+    ]
+    if reuse:
+        by_kind = {u["kind"]: u for u in reuse}
+        inst = by_kind.get(KIND_INSTRUMENT)
+        metric = by_kind.get(KIND_METRIC)
+        if market in (MARKET_HK, MARKET_US):
+            can_reuse = inst is not None
+        else:
+            can_reuse = inst is not None and metric is not None
+        if can_reuse:
+            units = [(Path(inst["path"]), KIND_INSTRUMENT)]
+            if metric is not None:
+                units.append((Path(metric["path"]), KIND_METRIC))
+            ctx.progress(95, "提交入库", f"复用 {len(units)} 个 validated 单元（kill 遗留）")
+            committed = staging.commit_units(DATASET_META, market, units, source=source.name)
+            ctx.progress(100, "完成", "复用上次中断的元数据单元")
+            return {
+                "market": market,
+                "as_of_date": None,
+                "instrument_rows": 0,
+                "metric_rows": 0,
+                "reused_units": committed,
+                "batches": [],
+                "message": "复用上次中断的元数据单元（未重新请求数据源）",
+            }
+
     ctx.progress(5, "准备交易日历", market)
     as_of = _ensure_latest_trade_date(ctx, market, source, repo)
     ctx.checkpoint()
 
     ctx.progress(20, "获取标的基本信息", market)
-    include_delisted = config.get_bool("data.include_delisted", True)
     try:
-        df_stocks = source.get_stock_list(market, include_delisted=include_delisted)
+        df_stocks = source.get_stock_list(market)
     except FatalDataSourceError:
         raise
     except Exception as exc:  # noqa: BLE001

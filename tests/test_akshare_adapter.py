@@ -79,7 +79,28 @@ def test_hk_daily_per_symbol(fake_ak):
     assert row["ts_code"] == "00700.HK"
     assert row["trade_date"] == "2026-11-13"
     assert row["close"] == 391.5
-    assert row["pre_close"] is None
+    assert row["pre_close"] == 390.5  # 前一日收盘（修复前恒为 NULL，change/pct_chg 全 NULL）
+
+
+def test_single_symbol_failure_does_not_block_others(fake_ak, monkeypatch):
+    """单标的失败只跳过该标的，不中断整日（修复前会 raise 卡死 HK/US 增量）。"""
+    source = AkshareSource()
+    ak = sys.modules["akshare"]
+
+    def failing_hk_hist(symbol, period="daily", adjust=""):
+        if symbol == "00700":
+            raise RuntimeError("模拟退市/接口异常")
+        return FakeAk.stock_hk_hist_sina(ak, symbol, period=period, adjust=adjust)
+
+    monkeypatch.setattr(ak, "stock_hk_hist_sina", failing_hk_hist)
+    df = source.get_daily(MARKET_HK, "2026-11-13", symbols=["00700.HK", "00005.HK"])
+    assert len(df) == 1  # 00700 失败被跳过，00005 正常返回
+    assert df.iloc[0]["ts_code"] == "00005.HK"
+    # 失败清单随结果传出（否则 fetcher 判部分成功后失败标的缺失会静默永久化）
+    failed = df.attrs.get("failed_symbols") or []
+    assert len(failed) == 1
+    assert failed[0]["symbol"] == "00700.HK"
+    assert "RuntimeError" in failed[0]["error"]
 
 
 def test_us_daily_no_amount(fake_ak):

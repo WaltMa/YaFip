@@ -1,6 +1,7 @@
 """运行时配置：全部存 app_config，读多写少，内存缓存 + 写后热加载。"""
 from __future__ import annotations
 
+import math
 import threading
 from datetime import datetime
 from typing import Any, Callable
@@ -11,7 +12,6 @@ from yafip.core.db import Database, now_iso
 DEFAULTS: dict[str, str] = {
     "server.port": "8203",
     "server.stop_wait_sec": "0",
-    "task.max_workers": "2",
     "task.max_concurrency": "10",
     "task.cpu_ratio": "0.10",
     "task.cpu_budget_ratio": "0.50",
@@ -20,7 +20,6 @@ DEFAULTS: dict[str, str] = {
     "fetch.timeout_sec": "15",
     "fetch.retry_max": "3",
     "data.start_date": "2010-01-01",
-    "data.include_delisted": "1",
     "whitelist.metric": "total_mv",
     "whitelist.threshold_wan": "500000.0",
     "staging.retention_days": "30",
@@ -43,6 +42,8 @@ REMOVED_KEYS = {
     "data.mv_metric",
     "data.mv_period",
     "data.whitelist_rule_id",
+    "data.include_delisted",  # 元数据只收当前上市（L），见 data/tushare_source.get_stock_list
+    "task.max_workers",  # 死配置：并发由 task.max_concurrency（信号量）控制，界面已换暴露 max_concurrency
 }
 
 # 数据源配置（token 等）并入 app_config，但只经「数据源配置」页读写。
@@ -52,13 +53,16 @@ DATASOURCE_KEY_PREFIX = "datasource."
 
 
 class ConfigError(ValueError):
-    pass
+    """配置错误：校验失败 / 未知键 / 废弃键（对齐错误码表 1001 config）。"""
+    code = "1001"
+    http_status = 400
 
 
 def _require_int(key: str, value: Any, lo: int, hi: int | None) -> None:
     try:
         num = int(float(str(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError 覆盖 int(float("inf"))；nan/inf 都是毒值，不允许持久化
         raise ConfigError(f"{key} 必须是整数，收到：{value}") from None
     if num < lo or (hi is not None and num > hi):
         limit = "以上" if hi is None else f"~{hi}"
@@ -70,6 +74,9 @@ def _require_float(key: str, value: Any, lo: float, hi: float | None) -> None:
         num = float(str(value))
     except (TypeError, ValueError):
         raise ConfigError(f"{key} 必须是数字，收到：{value}") from None
+    if not math.isfinite(num):
+        # nan/inf 通过比较校验后会被持久化，之后 JSON 序列化 500（重启依旧）
+        raise ConfigError(f"{key} 必须是有限数字，收到：{value}")
     if num < lo or (hi is not None and num > hi):
         limit = "以上" if hi is None else f"~{hi}"
         raise ConfigError(f"{key} 取值范围应为 {lo}{limit}，收到：{num}")
@@ -93,7 +100,6 @@ def _require_iso_date(key: str, value: Any) -> None:
 VALIDATORS: dict[str, Callable[[Any], None]] = {
     "server.port": lambda v: _require_int("server.port", v, 1, 65535),
     "server.stop_wait_sec": lambda v: _require_int("server.stop_wait_sec", v, 0, 86400),
-    "task.max_workers": lambda v: _require_int("task.max_workers", v, 1, 64),
     "task.max_concurrency": lambda v: _require_int("task.max_concurrency", v, 1, 64),
     "task.cpu_ratio": lambda v: _require_float("task.cpu_ratio", v, 0.01, 1.0),
     "task.cpu_budget_ratio": lambda v: _require_float("task.cpu_budget_ratio", v, 0.01, 1.0),
@@ -105,8 +111,6 @@ VALIDATORS: dict[str, Callable[[Any], None]] = {
     "staging.retention_days": lambda v: _require_int("staging.retention_days", v, 1, 365),
     "sse.heartbeat_sec": lambda v: _require_int("sse.heartbeat_sec", v, 1, 3600),
     "data.start_date": lambda v: _require_iso_date("data.start_date", v),
-    "data.include_delisted": lambda v: _require_bool("data.include_delisted", v),
-    "whitelist.enabled": lambda v: _require_bool("whitelist.enabled", v),
     "whitelist.threshold_wan": lambda v: _require_float("whitelist.threshold_wan", v, 0.0, None),
 }
 
@@ -121,6 +125,12 @@ class ConfigService:
     def seed_defaults(self) -> None:
         now = now_iso()
         with self.db.tx() as conn:
+            # 已废弃键（REMOVED_KEYS）启动时清除，避免旧库残留双份真相
+            if REMOVED_KEYS:
+                conn.execute(
+                    "DELETE FROM app_config WHERE key IN (%s)" % ",".join("?" for _ in REMOVED_KEYS),
+                    tuple(sorted(REMOVED_KEYS)),
+                )
             for key, value in DEFAULTS.items():
                 conn.execute(
                     "INSERT OR IGNORE INTO app_config(key, value, updated_at) VALUES(?,?,?)",

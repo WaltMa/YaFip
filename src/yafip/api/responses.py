@@ -15,6 +15,7 @@ from yafip.core.task_center import TaskError
 from yafip.data.base import DataSourceError
 from yafip.data.executors import ExecutorError
 from yafip.data.fetcher import FetchParamError
+from yafip.data.market import MarketError
 from yafip.data.whitelist import WhitelistError
 
 ERRORS = {
@@ -29,6 +30,7 @@ ERRORS = {
     "4001": "DATA_QUERY_RANGE_TOO_LARGE",
     "5001": "WHITELIST_INVALID",
     "5002": "MV_UNIT_MISMATCH",
+    "6001": "MARKET_INVALID",
 }
 
 
@@ -85,6 +87,7 @@ def install_error_handlers(app: FastAPI) -> None:
         DataSourceError,
         ExecutorError,
         FetchParamError,
+        MarketError,
         WhitelistError,
     ):
         app.add_exception_handler(cls, domain_error_handler)

@@ -47,16 +47,33 @@ def require_market(market: str) -> str:
 
 
 def normalize_symbol(market: str, raw: str) -> str:
-    """把数据源原始符号规范化为内部 symbol；不做市场猜测。"""
+    """把数据源原始符号规范化为内部 symbol；不做市场猜测。
+
+    - CN_A：严格要求带交易所后缀（600519.SH），裸 600519 会被源侧
+      ts_code（600519.SH）匹配不上而全被过滤，直接抛错提示格式；
+    - HK：数字代码补零到 5 位（Sina 需要 00700 而非 700/0700），
+      800700 等 6 位保持原样；带后缀则校验后补零；
+    - US：原样（AAPL / QQQ / ^VIX）。
+    """
     require_market(market)
     text = str(raw or "").strip().upper()
     if not text:
         raise MarketError(f"{market} 标的名称为空")
     if market == MARKET_CN_A:
-        return text  # 600519.SH 原样
+        if not _CN_A_RE.match(text):
+            raise MarketError(
+                f"A 股 symbol 格式应为 600519.SH / 513100.SH / 000688.SH，收到：{raw}"
+            )
+        return text
     if market == MARKET_HK:
-        # 00700 / 00700.HK → 00700.HK（补后缀）
-        return text if text.endswith(".HK") else f"{text}.HK"
+        if text.endswith(".HK"):
+            code = text[:-3]
+            if not code.isdigit():
+                raise MarketError(f"港股 symbol 格式应为 00700.HK / 800700.HK，收到：{raw}")
+            return f"{code.zfill(5)}.HK"
+        if text.isdigit():
+            return f"{text.zfill(5)}.HK"
+        raise MarketError(f"港股 symbol 格式应为 00700.HK / 800700.HK，收到：{raw}")
     # US：原样（AAPL / QQQ / ^VIX）
     return text
 

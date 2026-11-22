@@ -83,7 +83,7 @@ def build_context(root: Path) -> AppContext:
 
     repo = Repository(db)
     sse = SSEBroker()
-    tasks = TaskCenter(db, sse, config.get_int("task.max_workers", 2), config)
+    tasks = TaskCenter(db, sse, config=config)
     audit = AuditService(db)
     source = TushareSource(repo, config)
     akshare_source = AkshareSource()
@@ -129,6 +129,17 @@ def build_context(root: Path) -> AppContext:
     )
 
 
+ALLOWED_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def _hostname_allowed(host: str | None) -> bool:
+    """Host 白名单：仅本机回环地址（防 DNS rebinding 攻击）。"""
+    if not host:
+        return False
+    hostname = host.split(":")[0].strip("[]").lower()
+    return hostname in ALLOWED_HOSTNAMES
+
+
 def _origin_matches_host(origin: str, host: str) -> bool:
     """Origin 与 Host 同源即放行；浏览器发起的跨站请求（攻击页面 → 127.0.0.1）
     两者必然不一致。无 Origin 的请求（curl / 脚本 / 旧浏览器简单请求）不拦截，
@@ -152,7 +163,10 @@ def create_app(root: Path) -> FastAPI:
             yield
         finally:
             logger.info("yafip 正在关闭")
-            ctx.tasks.shutdown()
+            # 先停任务再关连接：shutdown 内部限时等待运行中任务收尾并把残留
+            # PENDING/RUNNING 落终态，避免运行线程被跨线程关连接后写库失败。
+            wait_sec = ctx.config.get_int("server.stop_wait_sec", 0) or 5.0
+            ctx.tasks.shutdown(wait_timeout=wait_sec)
             ctx.db.close_all()
 
     app = FastAPI(
@@ -163,14 +177,22 @@ def create_app(root: Path) -> FastAPI:
     )
     install_error_handlers(app)
 
-    # 管理接口无认证（本地单机工具）；至少拦截浏览器跨站写请求（CSRF）
+    # 管理接口无认证（本地单机工具）；至少拦截浏览器跨站写请求（CSRF）。
+    # Host 白名单（仅本机回环）防止 DNS rebinding：攻击域名解析到 127.0.0.1 时
+    # Host 头是攻击域名，与 Origin 相同也能通过旧的 Origin 校验——这里直接拒绝。
     # POST /system/stop、/cleanup、/vacuum、/tasks/{id}/kill|retry 等均无 body、
-    # 绑定 127.0.0.1，第三方页面可轻易构造请求。校验 Origin vs Host 为最低成本防线。
+    # 绑定 127.0.0.1，第三方页面可轻易构造请求。校验 Host + Origin 为最低成本防线。
     @app.middleware("http")
     async def guard_cross_site_mutations(request: Request, call_next):
+        host = request.headers.get("host", "")
+        if not _hostname_allowed(host):
+            return JSONResponse(
+                status_code=403,
+                content={"code": 9999, "message": "非法 Host 头，请求被拒绝（仅允许本机 127.0.0.1/localhost）", "data": None},
+            )
         if request.method in {"POST", "PUT", "DELETE", "PATCH"}:
             origin = request.headers.get("origin")
-            if origin and not _origin_matches_host(origin, request.headers.get("host", "")):
+            if origin and not _origin_matches_host(origin, host):
                 return JSONResponse(
                     status_code=403,
                     content={"code": 9999, "message": "跨站写请求被拒绝（Origin 校验失败）", "data": None},

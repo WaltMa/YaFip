@@ -121,7 +121,7 @@ class TaskCenter:
         self,
         db: Database,
         sse: SSEBroker,
-        max_workers: int = 2,
+        max_workers: int = 2,  # 弃用：并发由 task.max_concurrency（信号量）控制，本参数仅兼容旧调用
         config: Any = None,
     ):
         self.db = db
@@ -142,8 +142,9 @@ class TaskCenter:
             if config is not None
             else GLOBAL_CPU_BUDGET_RATIO
         )
-        # 线程池至少能容纳并发上限，信号量负责真正的并发闸门
-        pool_workers = max(2, max_workers, self.max_concurrency)
+        # 线程池至少能容纳并发上限，信号量负责真正的并发闸门；
+        # 不再叠加 max_workers（原配置已下线，实为死配置）
+        pool_workers = max(2, self.max_concurrency)
         self._executor = ThreadPoolExecutor(
             max_workers=pool_workers, thread_name_prefix="yafip-task"
         )
@@ -229,12 +230,28 @@ class TaskCenter:
                 raise TaskError("服务正在停止，任务已取消")
             self._tokens[task_id] = CancelToken()
 
-        self._publish(task_id)
-        self.append_log(task_id, "INFO", f"任务已提交：{spec.task_type}/{spec.executor}")
-        if not self._try_start(task_id, spec.handler, spec.params):
-            self.append_log(task_id, "INFO", "任务排队中（并发已达上限）")
-            with self._lock:
-                self._waiting.append(task_id)
+        try:
+            self._publish(task_id)
+            self.append_log(task_id, "INFO", f"任务已提交：{spec.task_type}/{spec.executor}")
+            if not self._try_start(task_id, spec.handler, spec.params):
+                self.append_log(task_id, "INFO", "任务排队中（并发已达上限）")
+                with self._lock:
+                    self._waiting.append(task_id)
+        except Exception as exc:  # noqa: BLE001 - 编排失败不留下幽灵任务
+            # PENDING 已落库但 publish/log/start 异常：清 token 并把任务落终态，
+            # 否则该 lock_key 被永久占用，后续同类型任务全部冲突
+            self._cleanup(task_id)
+            try:
+                self.db.execute(
+                    """
+                    UPDATE task SET status='FAILED', error=?, finished_at=?, stage='中断'
+                    WHERE id=? AND status='PENDING'
+                    """,
+                    (f"任务提交后编排失败：{exc}", now_iso(), task_id),
+                )
+            except Exception:  # noqa: BLE001 - 兜底标记失败
+                pass
+            raise TaskError(f"任务提交失败：{exc}") from exc
         return task_id
 
     # -- 并发闸门 -----------------------------------------------------------
@@ -350,7 +367,12 @@ class TaskCenter:
         if status == "SUCCESS":
             sets.append("stage='完成'")
         values.append(task_id)
-        self.db.execute(f"UPDATE task SET {', '.join(sets)} WHERE id=?", values)
+        # 状态守卫：只允许从非终态转移，防止 shutdown/kill 落终态后，
+        # 运行线程的迟到 SUCCESS/FAILED 覆盖（互斥失效）
+        self.db.execute(
+            f"UPDATE task SET {', '.join(sets)} WHERE id=? AND status IN ('PENDING','RUNNING','STOPPING')",
+            values,
+        )
         if status == "SUCCESS" and result:
             self.append_log(task_id, "INFO", f"任务完成：{json.dumps(result, ensure_ascii=False, default=str)[:1000]}")
         elif status == "FAILED":
@@ -474,15 +496,49 @@ class TaskCenter:
             token = self._tokens.setdefault(task_id, CancelToken())
             token.cancel()
 
+        if status == "STOPPING":
+            # 幂等：已在停止中（首次 kill 已 cancel token），重复 kill 直接成功；
+            # 否则 _mark_stopping 的 RUNNING 守卫会 0 行并把 STOPPING 误当终态抛 409。
+            return True
         if status == "PENDING":
-            self._finish(task_id, "KILLED", message="任务在排队阶段被取消")
-        else:
-            self.db.execute(
-                "UPDATE task SET status='STOPPING', message='正在停止：等待当前交易单元结束' WHERE id=?",
-                (task_id,),
+            # 守卫更新：读取状态到写入之间任务可能已进入 RUNNING/终态，
+            # 无谓词 UPDATE 会把已 SUCCESS 的任务改回 KILLED（互斥失效）
+            updated = self.db.execute(
+                """
+                UPDATE task SET status='KILLED', finished_at=?, message=?, stage='中断'
+                WHERE id=? AND status='PENDING'
+                """,
+                (now_iso(), "任务在排队阶段被取消", task_id),
             )
-            self.append_log(task_id, "WARN", "收到取消请求，将在当前交易单元结束后退出")
+            if not updated:
+                current = self.get(task_id)
+                if current["status"] in TERMINAL:
+                    raise TaskNotKillable(f"任务已结束（{current['status']}），无法杀死")
+                return self._mark_stopping(task_id)
+            self.append_log(task_id, "WARN", "排队任务已取消")
             self._publish(task_id)
+            return True
+        return self._mark_stopping(task_id)
+
+    def _mark_stopping(self, task_id: str) -> bool:
+        """RUNNING → STOPPING（守卫更新；0 行说明任务已在读取后结束）。"""
+        updated = self.db.execute(
+            """
+            UPDATE task SET status='STOPPING', message='正在停止：等待当前交易单元结束'
+            WHERE id=? AND status='RUNNING'
+            """,
+            (task_id,),
+        )
+        if not updated:
+            current = self.get(task_id)
+            if current["status"] in TERMINAL:
+                raise TaskNotKillable(f"任务已结束（{current['status']}），无法杀死")
+            if current["status"] == "STOPPING":
+                # 竞态：读取状态后已被其他 kill 置 STOPPING，幂等成功
+                return True
+            raise TaskNotKillable(f"任务状态异常：{current['status']}")  # 理论不可达，兜底
+        self.append_log(task_id, "WARN", "收到取消请求，将在当前交易单元结束后退出")
+        self._publish(task_id)
         return True
 
     def retry(self, task_id: str) -> str:
@@ -511,8 +567,11 @@ class TaskCenter:
 
     # -- 启动恢复 -----------------------------------------------------------
     def recover(self) -> int:
-        """拆分语义：STOPPING 是用户主动停止 → KILLED；RUNNING 是被迫中断 → FAILED。"""
-        rows = self.db.query("SELECT id, status FROM task WHERE status IN ('RUNNING','STOPPING')")
+        """拆分语义：STOPPING 是用户主动停止 → KILLED；RUNNING 是被迫中断 → FAILED；
+        PENDING 是排队未启动（Ctrl+C 等退出路径遗留）→ FAILED，释放 lock_key。"""
+        rows = self.db.query(
+            "SELECT id, status FROM task WHERE status IN ('PENDING','RUNNING','STOPPING')"
+        )
         for row in rows:
             if row["status"] == "STOPPING":
                 self.db.execute(
@@ -523,6 +582,15 @@ class TaskCenter:
                     ("服务重启，停止中的任务被标记为已杀死", now_iso(), row["id"]),
                 )
                 self.append_log(row["id"], "WARN", "服务重启，停止中的任务被标记为已杀死")
+            elif row["status"] == "PENDING":
+                self.db.execute(
+                    """
+                    UPDATE task SET status='FAILED', error=?, finished_at=?, stage='中断'
+                    WHERE id=? AND status='PENDING'
+                    """,
+                    ("服务重启，排队中的任务被取消（未开始执行）", now_iso(), row["id"]),
+                )
+                self.append_log(row["id"], "ERROR", "服务重启，排队中的任务被取消")
             else:
                 self.db.execute(
                     """
@@ -560,8 +628,27 @@ class TaskCenter:
                 continue
         return killed
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait_timeout: float = 0.0) -> None:
+        """关闭线程池；把残留 PENDING/RUNNING 统一落终态（FAILED）。
+
+        - 先取消未启动的 future；wait_timeout>0 时等运行中任务结束（有界）；
+        - 超时/直接调用时把残留 PENDING/RUNNING 标记 FAILED，避免 Ctrl+C 后
+          排队任务永远 PENDING 占着 lock_key。
+        """
         self._executor.shutdown(wait=False, cancel_futures=True)
+        if wait_timeout and wait_timeout > 0:
+            deadline = time.monotonic() + wait_timeout
+            while time.monotonic() < deadline:
+                if self.active_count() == 0:
+                    break
+                time.sleep(0.2)
+        self.db.execute(
+            """
+            UPDATE task SET status='FAILED', error=?, finished_at=?, stage='中断'
+            WHERE status IN ('PENDING','RUNNING')
+            """,
+            ("服务关闭导致中断，可重跑（断点会自动续传）", now_iso()),
+        )
 
     # -- SSE ----------------------------------------------------------------
     def _publish(self, task_id: str) -> None:

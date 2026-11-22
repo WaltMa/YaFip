@@ -153,6 +153,8 @@ class StagingStore:
         status = APPLIED if statuses == {APPLIED} else FAILED if FAILED in statuses else (
             VALIDATED if statuses == {VALIDATED} else CREATED
         )
+        # manifest 指纹：随状态/内容变化，不再恒为空串
+        checksum = self._checksum(json.dumps(manifest, sort_keys=True))
         self.db.execute(
             """
             INSERT INTO staging_batch(
@@ -168,7 +170,7 @@ class StagingStore:
                 batch_id, manifest.get("task_id"), manifest.get("market"),
                 manifest.get("dataset"), str(self._manifest_path(
                     manifest["dataset"], manifest["market"], batch_id)),
-                total, "", status, now_iso(),
+                total, checksum, status, now_iso(),
             ),
         )
 
@@ -229,6 +231,9 @@ class StagingStore:
             adj_type, fallback = adj_policy
             if adj_type == "FACTOR" and (df.get("adj_factor") is None or df["adj_factor"].isna().any()):
                 errors.append("复权因子缺失（FACTOR 模式不允许空值）")
+            if adj_type == "FACTOR" and "adj_factor" in df.columns and (df["adj_factor"] <= 0).any():
+                # 0/负因子会让查询层除零产生 NULL 价格，必须拒绝
+                errors.append("复权因子必须大于 0（FACTOR 模式）")
             errors += self._validate_key_unique(df, market)
         elif kind == KIND_INSTRUMENT:
             if "symbol" not in df.columns or df["symbol"].isna().any():
@@ -357,10 +362,13 @@ class StagingStore:
                                 unit=record.get("unit"), as_of_date=record.get("as_of_date"),
                                 source=source,
                             )
-                    self.mark_unit_status(
-                        dataset, market, batch_id, csv_path.name, APPLIED,
-                        applied_at=now_iso(),
-                    )
+            # COMMIT 成功后才标 applied：若在 COMMIT 前写 manifest，断电/硬杀会留下
+            # “已 applied 但 DB 无数据”的假象，下次增量会跳过该日并推进水位 → 永久数据空洞。
+            for csv_path, _kind in units:
+                self.mark_unit_status(
+                    dataset, market, csv_path.parent.name, csv_path.name, APPLIED,
+                    applied_at=now_iso(),
+                )
         except Exception as exc:  # noqa: BLE001
             # 回滚由 tx() 负责；标记失败单元，文件保留供人工核对与重跑
             for csv_path, _kind in units:
@@ -435,6 +443,11 @@ class StagingStore:
                 })
         return found
 
+    def _remove_batch_dir(self, batch_dir: Path) -> None:
+        """目录与 staging_batch 登记行同批删除，避免只增不减的孤儿行。"""
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        self.db.execute("DELETE FROM staging_batch WHERE batch_id=?", (batch_dir.name,))
+
     def cleanup(
         self,
         retention_days: int,
@@ -464,7 +477,7 @@ class StagingStore:
                         continue
                     manifest = self._load_manifest(dataset_dir.name, market, batch_dir.name)
                     if manifest is None:
-                        shutil.rmtree(batch_dir, ignore_errors=True)
+                        self._remove_batch_dir(batch_dir)
                         removed += 1
                         continue
                     created = str(manifest.get("created_at") or "")[:10]
@@ -477,6 +490,10 @@ class StagingStore:
                                 removable = False
                                 break
                         elif status == VALIDATED:
+                            # bars validated 必须保留（复用）；meta validated 超过保留期可清理
+                            # （重跑成本低，避免无限堆积）
+                            if dataset_dir.name == DATASET_META and created < cutoff:
+                                continue
                             removable = False  # 已校验未提交：保留用于复用
                             break
                         elif status == APPLIED:
@@ -491,7 +508,7 @@ class StagingStore:
                                 break
                             # range applied / meta applied / incremental 已被水位覆盖 → 可清理
                     if removable:
-                        shutil.rmtree(batch_dir, ignore_errors=True)
+                        self._remove_batch_dir(batch_dir)
                         removed += 1
         if removed and self.audit is not None:
             self.audit.write("staging.cleanup", str(self.root), f"removed={removed}")

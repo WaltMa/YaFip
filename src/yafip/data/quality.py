@@ -161,7 +161,8 @@ class QualityService:
             return []
 
         where = ["i.market = ?"]
-        params: list[Any] = [market, start, end]
+        # 注意占位符顺序：JOIN 的 d.trade_date BETWEEN ? AND ? 在前，WHERE i.market = ? 在后
+        params: list[Any] = [start, end, market]
         if symbols:
             where.append(f"i.symbol IN ({','.join('?' for _ in symbols)})")
             params.extend(symbols)

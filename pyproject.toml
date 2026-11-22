@@ -37,6 +37,6 @@ include = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not slow'"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = ["slow: 真实接口冒烟（需 token/网络）"]

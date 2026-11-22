@@ -55,14 +55,20 @@ POST /api/tasks {task_type, executor, market, params}
       → 并发闸门：Semaphore(max_concurrency) 有许可 → 工作线程；否则 _waiting 排队（不占线程）
   → handler（tasks.* / tasks_ak.*，按 source 绑定 Fetcher）
       → 抓取(网络IO, 限频) → staging.write_unit(created)
-      → validate_unit（OHLC/日期/白名单合规/单位…）
-      → 通过 → mark VALIDATED        # I-01：kill 后可复用
-      → 全部单元完成 → commit_units（单事务 upsert + 标 applied；跨 batch，单写队列 _COMMIT_LOCK）
-  → 仅 bars.incremental 且整次无失败 → sync_state.last_trade_date 推进到窗口最后开市日
+      → validate_unit（OHLC/日期/白名单合规/单位…；FACTOR 因子必须 >0）
+      → 通过 → mark VALIDATED        # I-01：kill 后可复用（fetcher/meta 均实现）
+      → 全部单元完成 → commit_units（单事务 upsert；COMMIT 成功后才标 applied，跨 batch，单写队列 _COMMIT_LOCK）
+  → 仅 bars.incremental 且整次无失败且未带显式 symbols → sync_state.last_trade_date 推进到窗口最后开市日
   → 失败/被杀：文件保留（created/validated），重跑按 I-01~I-04 复用，DB 零污染
 ```
 
-复用三分支（fetcher）：两 kind 全 applied → 跳过；两 kind 在（含 validated）→ 不重抓 + validated 入提交批次；覆盖不全 → 重抓。复用按 `task_type/executor/symbols` 全等隔离。
+复用三分支（fetcher）：两 kind 全 applied → 跳过；两 kind 在（含 validated）→ 不重抓 + validated 入提交批次；覆盖不全 → 重抓。复用按 `task_type/executor/symbols` 全等隔离。meta（sync_all/sync_symbols）kill 重跑复用同 task_type/executor 的 validated 单元（CN_A 需 instrument+metric 齐备），applied 不复用（全量刷新避免陈旧）。
+
+增量水位语义：
+- **未收盘截止到市场本地昨日**：增量窗口上限按 `policy.market_closed` 判定——先把 UTC 按市场本地时区换算（CN_A/HK UTC+8，US 美东近似 DST），得到「市场本地日期+时间」，再比较是否过收盘时刻（CN_A 15:00 / HK 16:00 / US 16:00 美东）；未收盘则不纳入市场本地“今天”，由 `latest_open_date` 收敛到最近一个已收盘的开市日。US 交易日相对服务器日期有偏移，绝不使用服务器 `today-1` 推导（会把正在交易的美股日期当作已收盘、抓盘中快照）；
+- **带 symbols 不推水位**：增量带显式 symbols 是部分抓取，不推进整市场 WHITELIST 水位（其余白名单成员该段历史仍需覆盖）；
+- **0 命中判失败**：源有数据但 0 命中目标集合 → 当日失败、不推水位（白名单含源不覆盖标的时持续失败直到移除，可见可处置，不再静默永久跳过）；
+- **akshare 单标的失败写任务结果**：单标的接口失败只跳过该标的（不阻断整日），失败清单经 `df.attrs["failed_symbols"]` 传出并汇总进任务结果 `result["failed_symbols"]`（任务详情可见、可查），水位仍推进（避免退市标卡死整市场）；缺失数据需用日K区间/修复或质量页一键补缺。
 
 ## 4. 执行器注册表扩展点（data/executors.py）
 
@@ -100,8 +106,8 @@ ExecutorSpec(name, task_type, source, markets, handler, params_schema, implement
 
 ## 8. 错误码（api/responses.py）
 
-`1001 config · 1002 datasource · 1003 token · 2001~2004 task · 3001 executor · 4001 参数/查询 · 5001 whitelist · 5002 mv_unit · 7001 staging · 9999 兜底`
+`1001 config · 1002 datasource · 1003 token · 2001~2004 task · 3001 executor · 4001 参数/查询 · 5001 whitelist · 5002 mv_unit · 6001 market · 7001 staging · 9999 兜底`
 
 ## 9. 配置键（config.py DEFAULTS）
 
-`server.port=8203 · task.max_workers=2 · task.max_concurrency=10 · task.cpu_ratio=0.10 · task.cpu_budget_ratio=0.50 · fetch.rpm=120 · fetch.meta_rpm=1 · fetch.timeout_sec=15 · fetch.retry_max=3 · data.start_date=2010-01-01 · data.include_delisted=1 · whitelist.metric=total_mv · whitelist.threshold_wan=500000.0 · staging.retention_days=30 · task.retention_days=90 · sse.heartbeat_sec=15`；`datasource.*` 仅「数据源配置」页读写。
+`server.port=8203 · server.stop_wait_sec=0 · task.max_concurrency=10 · task.cpu_ratio=0.10 · task.cpu_budget_ratio=0.50 · fetch.rpm=120 · fetch.meta_rpm=1 · fetch.timeout_sec=15 · fetch.retry_max=3 · data.start_date=2010-01-01 · whitelist.metric=total_mv · whitelist.threshold_wan=500000.0 · staging.retention_days=30 · task.retention_days=90 · sse.heartbeat_sec=15`；`datasource.*` 仅「数据源配置」页读写。A 股元数据只收录当前上市（L）股票（单次 `stock_basic` 调用），见 `data/tushare_source.py`。

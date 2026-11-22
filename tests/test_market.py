@@ -31,6 +31,18 @@ def test_normalize_hk_appends_suffix():
     assert normalize_symbol(MARKET_HK, "00700") == "00700.HK"
     assert normalize_symbol(MARKET_HK, "00700.hk") == "00700.HK"
     assert normalize_symbol(MARKET_HK, "800700.HK") == "800700.HK"
+    # 未补零代码：Sina 需要 00700 而非 700/0700（修复前 700 → 700.HK 匹配不上源侧）
+    assert normalize_symbol(MARKET_HK, "700") == "00700.HK"
+    assert normalize_symbol(MARKET_HK, "0700") == "00700.HK"
+    assert normalize_symbol(MARKET_HK, "700.HK") == "00700.HK"
+
+
+def test_normalize_cn_a_rejects_bare_code():
+    # 裸 600519 无后缀会被源侧 ts_code（600519.SH）匹配不上而全被过滤，必须直接抛错
+    with pytest.raises(MarketError, match="格式应为"):
+        normalize_symbol(MARKET_CN_A, "600519")
+    with pytest.raises(MarketError, match="格式应为"):
+        normalize_symbol(MARKET_CN_A, "600519.SHH")
 
 
 def test_normalize_us_keeps_ticker():
