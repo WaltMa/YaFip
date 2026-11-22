@@ -1,1 +1,36 @@
 
+name: main-source-check
+
+"on":
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  only-dev-to-main:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check source branch
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REF" != "dev" ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::Only dev can merge into main."
+            exit 1
+          fi
+
+          echo "Source branch check passed."
