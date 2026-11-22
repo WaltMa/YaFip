@@ -1,6 +1,7 @@
+
 name: main-source-check
 
-on:
+"on":
   pull_request:
     branches:
       - main
@@ -9,6 +10,8 @@ on:
       - synchronize
       - reopened
       - edited
+
+  workflow_dispatch:
 
 permissions:
   contents: read

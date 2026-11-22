@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -295,3 +296,44 @@ def test_validated_unit_lifecycle_and_cross_batch_commit(tmp_path):
     assert manifest["units"][bars_csv.name]["status"] == "applied"
     # 提交后 cleanup：incremental 无水位 → 仍保留
     assert store.cleanup(30, {}) == 0
+
+
+def test_batch_checksum_is_manifest_fingerprint(tmp_path):
+    """checksum 是 manifest 指纹，随状态变化，不再写死空串。"""
+    db, repo, store = make_store(tmp_path)
+    batch_id = "b-checksum"
+    csv = store.write_unit(
+        batch_id=batch_id, task_id="t1", task_type="bars.range", executor="tushare.bars.range",
+        source="tushare", market=MARKET, dataset=DATASET_BARS, unit_key="2025-01-02",
+        kind=KIND_BARS, df=_bars_df(), params_snapshot={},
+    )
+    manifest = json.loads((csv.parent / "manifest.json").read_text(encoding="utf-8"))
+    expected = hashlib.sha1(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    row = db.query_one("SELECT checksum FROM staging_batch WHERE batch_id=?", (batch_id,))
+    assert row["checksum"] == expected
+    assert row["checksum"] and row["checksum"] != ""
+
+    store.mark_unit_status(DATASET_BARS, MARKET, batch_id, csv.name, VALIDATED)
+    updated = db.query_one("SELECT checksum FROM staging_batch WHERE batch_id=?", (batch_id,))
+    assert updated["checksum"] != row["checksum"]
+
+
+def test_cleanup_deletes_staging_batch_row(tmp_path):
+    """cleanup 删目录时同步删除登记行，避免 staging_batch 只增不减。"""
+    db, repo, store = make_store(tmp_path)
+    batch_id = "b-cleanup"
+    csv = store.write_unit(
+        batch_id=batch_id, task_id="t1", task_type="bars.range", executor="tushare.bars.range",
+        source="tushare", market=MARKET, dataset=DATASET_BARS, unit_key="2025-01-02",
+        kind=KIND_BARS, df=_bars_df(), params_snapshot={},
+    )
+    store.commit_units(DATASET_BARS, MARKET, [(csv, KIND_BARS)],
+                       source="tushare", currency="CNY", vol_unit="手", amount_unit="千元")
+    before = db.scalar("SELECT COUNT(*) FROM staging_batch")
+    assert db.scalar("SELECT COUNT(*) FROM staging_batch WHERE batch_id=?", (batch_id,)) == 1
+
+    assert store.cleanup(30, {}) == 1
+    assert not csv.exists()
+    after = db.scalar("SELECT COUNT(*) FROM staging_batch")
+    assert after == before - 1
+    assert db.scalar("SELECT COUNT(*) FROM staging_batch WHERE batch_id=?", (batch_id,)) == 0

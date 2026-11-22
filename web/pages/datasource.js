@@ -71,8 +71,10 @@
               <${antd.Form.Item}
                 label="Token"
                 name="token"
-                rules=${source.has_token ? [] : [{ required: true, message: "请输入 token" }]}
-                extra=${source.has_token
+                rules=${source.requires_token ? (source.has_token ? [] : [{ required: true, message: "请输入 token" }]) : []}
+                extra=${!source.requires_token
+                  ? "该数据源免 token"
+                  : source.has_token
                   ? "当前：" + source.token_masked + "（留空表示不修改）"
                   : "必填；仅保存在本地 SQLite"}
               >

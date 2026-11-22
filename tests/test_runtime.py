@@ -54,12 +54,9 @@ def test_set_many_rejects_invalid_values(tmp_path):
         "server.port": "abc",
         "server.port": "0",
         "server.port": "70000",
-        "task.max_workers": "-1",
-        "task.max_workers": "0",
         "fetch.rpm": "0",
         "fetch.meta_rpm": "-3",
         "data.start_date": "2025/01/01",
-        "data.include_delisted": "maybe",
         "whitelist.threshold_wan": "-1.0",
     }
     for key, value in cases.items():
@@ -67,6 +64,9 @@ def test_set_many_rejects_invalid_values(tmp_path):
             config.set_many({key: value})
         # 失败必须是原子：未落库、缓存未变
         assert config.get(key) != value or config.get(key) is None
+    # 已下线配置键（task.max_workers 死配置）写入必须报「已废弃」
+    with pytest.raises(ConfigError, match="已废弃"):
+        config.set_many({"task.max_workers": "8"})
     config.set_many({"sse.heartbeat_sec": "1", "fetch.rpm": "1"})
     assert config.get_int("sse.heartbeat_sec") == 1
 

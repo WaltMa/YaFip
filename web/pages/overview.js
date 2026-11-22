@@ -13,13 +13,12 @@
     const s = data || {};
     const wl = s.whitelist || {};
     const tasks = s.tasks || {};
-    const progress = s.progress || {};
     const datasource = s.datasource || {};
 
     const columns = [
       { title: "任务", dataIndex: "id", width: 110, render: (v) => html`<span className="mono">${fs.shortId(v)}</span>` },
-      { title: "业务", dataIndex: "business", width: 130 },
-      { title: "动作", dataIndex: "action", width: 110 },
+      { title: "任务类型", dataIndex: "task_type", width: 150 },
+      { title: "执行器", dataIndex: "executor", width: 150 },
       { title: "来源", dataIndex: "source", width: 90, render: (v) => html`<${Y.SourceTag} source=${v} />` },
       { title: "状态", dataIndex: "status", width: 100, render: (v) => html`<${Y.TaskStatusTag} status=${v} />` },
       { title: "进度", dataIndex: "progress", render: (v, r) => html`<${Y.ProgressCell} progress=${v} status=${r.status} stage=${r.stage} />` },
@@ -46,12 +45,12 @@
           : null}
 
         <div className="stat-grid">
-          <${antd.Card} size="small"><${antd.Statistic} title="股票列表" value=${s.stocks || 0} /><//>
-          <${antd.Card} size="small"><${antd.Statistic} title="日 K 行数" value=${s.daily_rows || 0} formatter=${fs.num} /><//>
-          <${antd.Card} size="small"><${antd.Statistic} title="覆盖交易日" value=${s.daily_dates || 0} /><//>
+          <${antd.Card} size="small"><${antd.Statistic} title="股票列表" value=${s.instruments || 0} /><//>
+          <${antd.Card} size="small"><${antd.Statistic} title="日 K 行数" value=${s.bar_rows || 0} formatter=${fs.num} /><//>
+          <${antd.Card} size="small"><${antd.Statistic} title="覆盖交易日" value=${s.bar_dates || 0} /><//>
           <${antd.Card} size="small">
-            <${antd.Statistic} title="白名单入选" value=${wl.included || 0} valueStyle=${{ color: "#1677ff" }} />
-            <div className="empty-note">${wl.enabled ? "市值日期 " + (wl.as_of_date || "-") : "未启用（全量入库）"}</div>
+            <${antd.Statistic} title="白名单明细" value=${wl.members || 0} valueStyle=${{ color: "#1677ff" }} />
+            <div className="empty-note">${wl.as_of_date ? "市值日期 " + wl.as_of_date : "暂无市值日期"}</div>
           <//>
           <${antd.Card} size="small"><${antd.Statistic} title="数据库体积" value=${fs.bytes(s.db_bytes)} /><//>
           <${antd.Card} size="small">
@@ -61,9 +60,9 @@
 
         <${antd.Card} size="small" title="数据状态" style=${{ marginBottom: 16 }} loading=${loading}>
           <${antd.Descriptions} column=${{ xs: 1, sm: 2, md: 3 }} size="small">
-            <${antd.Descriptions.Item} label="最新数据日">${s.latest_daily_date || "-"}<//>
-            <${antd.Descriptions.Item} label="下一待抓日">${s.next_pending_date || "-"}<//>
-            <${antd.Descriptions.Item} label="已完成交易日">${(progress.done || 0) + " / 失败 " + (progress.failed || 0)}<//>
+            <${antd.Descriptions.Item} label="最新数据日">${s.latest_bar_date || "-"}<//>
+            <${antd.Descriptions.Item} label="增量水位">${s.watermark || "-"}<//>
+            <${antd.Descriptions.Item} label="复权因子行">${s.adj_rows || 0}<//>
             <${antd.Descriptions.Item} label="任务">${"运行 " + ((tasks.RUNNING || 0) + (tasks.PENDING || 0) + (tasks.STOPPING || 0)) + " / 成功 " + (tasks.SUCCESS || 0) + " / 失败 " + (tasks.FAILED || 0)}<//>
             <${antd.Descriptions.Item} label="数据源">${datasource.has_token ? (datasource.last_test_ok === 1 ? "连接正常" : "已配置，未验证") : "未配置"}<//>
             <${antd.Descriptions.Item} label="服务健康">${health.data ? (health.data.db_ok ? "正常" : "数据库异常") : "-"}<//>

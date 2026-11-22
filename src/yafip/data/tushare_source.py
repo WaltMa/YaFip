@@ -240,28 +240,25 @@ class TushareSource(DataSource):
         if market != "CN_A":
             raise DataSourceError(f"tushare 仅支持 A 股（CN_A），收到市场：{market}（港美股请用 akshare 执行器）")
 
-    def get_stock_list(self, market: str, include_delisted: bool = True) -> pd.DataFrame:
+    def get_stock_list(self, market: str) -> pd.DataFrame:
         self._require_cn_a(market)
         pro = self._pro()
-        statuses = ["L", "D", "P"] if include_delisted else ["L"]
-        frames: list[pd.DataFrame] = []
-        for status in statuses:
-            df = self._call(
-                pro.stock_basic,
-                "stock_basic",
-                exchange="",
-                list_status=status,
-                fields="ts_code,symbol,name,area,industry,market,list_date,delist_date",
-            )
-            if df is None or df.empty:
-                continue
-            df = df.copy()
-            df["list_status"] = status
-            df["is_north"] = 0
-            frames.append(df)
-        if not frames:
+        # 只同步当前上市（L）股票，且只调 1 次 stock_basic：
+        # 低积分账号该接口常被限到 1 次/小时，按 L/D/P 分 3 段拉取在单个任务内无法完成
+        # （第一次成功后第二次即被拒，且前序结果不会落库，重试会永远卡住）；
+        # 退市/暂停上市（D/P）暂不收录，待「分段抓取+断点落库」机制完善后再放开。
+        df = self._call(
+            pro.stock_basic,
+            "stock_basic",
+            exchange="",
+            list_status="L",
+            fields="ts_code,symbol,name,area,industry,market,list_date,delist_date",
+        )
+        if df is None or df.empty:
             return pd.DataFrame(columns=BASIC_COLUMNS)
-        result = pd.concat(frames, ignore_index=True)
+        result = df.copy()
+        result["list_status"] = "L"
+        result["is_north"] = 0
         result["list_date"] = result["list_date"].map(normalize_date)
         result["delist_date"] = result["delist_date"].map(normalize_date)
         return ensure_columns(result, BASIC_COLUMNS)
@@ -338,54 +335,37 @@ class TushareSource(DataSource):
         return ensure_columns(df, MV_COLUMNS)
 
     # -- 连接测试 -----------------------------------------------------------
+    # 只调一次非复权日线 daily：120 积分即可用，取单只股票一小段历史区间（约 7 行），
+    # 不连带请求 trade_cal / daily_basic 等高积分或抓数接口，仅验证 token 是否可用。
+    # 固定历史区间避免节假日/周末导致 0 行误判。
     def test_connection(self) -> dict:
-        steps: list[dict] = []
         row = self.repo.get_datasource("tushare") or {}
         token = str(row.get("token") or "").strip()
         if not token:
             return {"ok": False, "steps": [{"name": "token", "ok": False, "message": "未配置 token"}]}
 
+        steps: list[dict] = []
         try:
             pro = self._pro(check_enabled=False)
-            start = (date.today() - timedelta(days=30)).isoformat()
-            end = date.today().isoformat()
-            cal = self._call(
-                pro.trade_cal,
-                "trade_cal",
+            df = self._call(
+                pro.daily,
+                "daily",
                 wait_on_limit=False,
-                exchange="SSE",
-                start_date=to_tushare_date(start),
-                end_date=to_tushare_date(end),
+                ts_code="000001.SZ",
+                start_date="20240102",
+                end_date="20240110",
+                fields="ts_code,trade_date,close",
             )
-            opens = cal[cal["is_open"] == 1]["cal_date"].tolist() if cal is not None else []
-            last_open = max(normalize_date(item) for item in opens) if opens else (
-                date.today() - timedelta(days=1)
-            ).isoformat()
-            steps.append({"name": "trade_cal", "ok": True, "message": f"最近交易日 {last_open}"})
+            count = len(df)
+            steps.append(
+                {
+                    "name": "daily",
+                    "ok": count > 0,
+                    "message": f"000001.SZ 日线返回 {count} 行" if count else "返回 0 行（积分或权限不足）",
+                }
+            )
         except Exception as exc:  # noqa: BLE001
-            return {
-                "ok": False,
-                "steps": steps + [{"name": "trade_cal", "ok": False, "message": str(exc)}],
-            }
-
-        for name, func in (("daily", pro.daily), ("daily_basic", pro.daily_basic)):
-            try:
-                df = self._call(
-                    func,
-                    name,
-                    wait_on_limit=False,
-                    trade_date=to_tushare_date(last_open),
-                )
-                count = 0 if df is None else len(df)
-                steps.append(
-                    {
-                        "name": name,
-                        "ok": count > 0,
-                        "message": f"{last_open} 返回 {count} 行" if count else "返回 0 行（积分或权限不足）",
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                steps.append({"name": name, "ok": False, "message": str(exc)})
+            steps.append({"name": "daily", "ok": False, "message": str(exc)})
 
         ok = all(step["ok"] for step in steps)
         self.repo.set_datasource_test("tushare", ok, "; ".join(s["message"] for s in steps if not s["ok"]) or "ok")

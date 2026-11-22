@@ -57,7 +57,7 @@ def test_real_adj_factor_one_date():
 @pytest.mark.slow
 def test_real_stock_list():
     source = _source()
-    df = source.get_stock_list("CN_A", include_delisted=True)
+    df = source.get_stock_list("CN_A")
     assert not df.empty
     assert "ts_code" in df.columns
 

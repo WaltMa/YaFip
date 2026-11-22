@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -8,6 +10,34 @@ from yafip.api.responses import ApiError, ok
 from yafip.data.registry import SOURCES, SourceMeta, get_source
 
 router = APIRouter(prefix="/api/datasources", tags=["datasource"])
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _validate_api_url(url: str | None) -> None:
+    """api_url 白名单：仅 https 或本机 http 调试地址。
+
+    token 会随请求发送到该地址——明文 http 到任意远程主机会导致 token 被
+    重定向窃取（攻击者只需把 api_url 改成自己的服务器再等一次抓取）。
+    """
+    text = str(url or "").strip()
+    if not text:
+        return
+    try:
+        parts = urlsplit(text if "://" in text else "https://" + text)
+    except ValueError:
+        raise ApiError("api_url 不是合法 URL", "1002", 400) from None
+    scheme = (parts.scheme or "https").lower()
+    hostname = (parts.hostname or "").lower()
+    if scheme == "https":
+        return  # 官方 / 自定义 https 网关均可（token 走 TLS）
+    if scheme == "http" and hostname in _LOCAL_HOSTS:
+        return  # 本机调试网关
+    raise ApiError(
+        "api_url 仅允许 https（或本机 http://127.0.0.1 调试地址），防止 token 被明文发送到远程主机",
+        "1002",
+        400,
+    )
 
 
 def _mask(token: str | None) -> str:
@@ -72,6 +102,7 @@ def get_datasource(name: str, request: Request):
 def save_datasource(name: str, body: DatasourceBody, request: Request):
     ctx = get_ctx(request)
     meta = _require_source(name)
+    _validate_api_url(body.api_url)
     ctx.repo.save_datasource(
         name,
         token=body.token,

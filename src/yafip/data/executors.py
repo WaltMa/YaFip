@@ -8,7 +8,9 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from yafip.data.market import MARKET_CN_A, MARKET_HK, MARKET_US, validate_symbol
@@ -173,14 +175,19 @@ class ExecutorRegistry:
                     value = float(value)
                 except (TypeError, ValueError):
                     raise ExecutorError(f"参数 {key} 必须是数字，收到：{value}") from None
+                if not math.isfinite(value):
+                    # nan/inf 能通过大小比较（nan<min 恒 False），会让规则 0 命中但任务成功
+                    raise ExecutorError(f"参数 {key} 必须是有限数字，收到：{value}")
                 if meta.get("min") is not None and value < meta["min"]:
                     raise ExecutorError(f"参数 {key} 不能小于 {meta['min']}")
                 if meta.get("max") is not None and value > meta["max"]:
                     raise ExecutorError(f"参数 {key} 不能大于 {meta['max']}")
             elif _type == "date":
                 text = str(value)
-                if len(text) != 10 or text[4] != "-" or text[7] != "-":
-                    raise ExecutorError(f"参数 {key} 必须是 YYYY-MM-DD，收到：{text}")
+                try:
+                    datetime.strptime(text, "%Y-%m-%d")
+                except ValueError:
+                    raise ExecutorError(f"参数 {key} 必须是合法日期 YYYY-MM-DD，收到：{text}") from None
             elif _type == "enum":
                 if value not in meta.get("options", []):
                     raise ExecutorError(f"参数 {key} 取值应为 {'/'.join(meta['options'])}，收到：{value}")

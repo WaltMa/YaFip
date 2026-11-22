@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 from typing import Any
 
@@ -75,8 +76,8 @@ class WhitelistService:
         elif payload.get("threshold_yi") is not None:
             threshold = float(payload["threshold_yi"]) * 10000.0
         if threshold is not None:
-            if threshold <= 0:
-                raise WhitelistError("门槛必须大于 0")
+            if not math.isfinite(threshold) or threshold <= 0:
+                raise WhitelistError("门槛必须为大于 0 的有限数字")
             values["whitelist.threshold_wan"] = str(threshold)
 
         self.config.set_many(values)

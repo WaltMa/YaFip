@@ -133,7 +133,7 @@ class Repository:
                     INSERT INTO app_config(key, value, updated_at) VALUES(?,?,?)
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
                     """,
-                    (self._ds_key(name, field), value),
+                    (self._ds_key(name, field), value, now),
                 )
 
     def datasource_token(self, name: str = "tushare") -> str:
@@ -399,27 +399,38 @@ class Repository:
         limit = max(1, min(20000, limit))
         if price_type in ("qfq", "hfq"):
             denominator = "COALESCE(anchor.f, 1.0)" if price_type == "qfq" else "1.0"
+            # 缺失因子日前向填充（取 ≤ 当日最近一个已知因子）：用最新因子兜底会把
+            # 缺因子日误当除权日，制造伪跳空；因子必须 >0（0/负值除零出 NULL）。
+            factor_expr = """COALESCE(a.adj_factor, (
+                    SELECT af.adj_factor FROM bar_adj_factor af
+                    WHERE af.market = d.market AND af.symbol = d.symbol
+                      AND af.trade_date <= d.trade_date
+                      AND af.adj_factor IS NOT NULL AND af.adj_factor > 0
+                    ORDER BY af.trade_date DESC LIMIT 1
+                ), 1.0)"""
             sql = f"""
             WITH anchor AS (
                 SELECT adj_factor AS f
                 FROM bar_adj_factor
                 WHERE market = ? AND symbol = ?
+                  AND adj_factor IS NOT NULL AND adj_factor > 0
                 ORDER BY trade_date DESC LIMIT 1
             )
             SELECT d.trade_date,
-                   d.open       * COALESCE(a.adj_factor, anchor.f, 1.0) / {denominator} AS open,
-                   d.high       * COALESCE(a.adj_factor, anchor.f, 1.0) / {denominator} AS high,
-                   d.low        * COALESCE(a.adj_factor, anchor.f, 1.0) / {denominator} AS low,
-                   d.close      * COALESCE(a.adj_factor, anchor.f, 1.0) / {denominator} AS close,
-                   d.pre_close  * COALESCE(a.adj_factor, anchor.f, 1.0) / {denominator} AS pre_close,
-                   (d.close - d.pre_close) * COALESCE(a.adj_factor, anchor.f, 1.0) / {denominator} AS change,
+                   d.open       * {factor_expr} / {denominator} AS open,
+                   d.high       * {factor_expr} / {denominator} AS high,
+                   d.low        * {factor_expr} / {denominator} AS low,
+                   d.close      * {factor_expr} / {denominator} AS close,
+                   d.pre_close  * {factor_expr} / {denominator} AS pre_close,
+                   (d.close - d.pre_close) * {factor_expr} / {denominator} AS change,
                    CASE WHEN d.pre_close IS NULL OR d.pre_close = 0 THEN NULL
                         ELSE ROUND((d.close - d.pre_close) * 100.0 / d.pre_close, 2)
                    END AS pct_chg,
-                   d.vol, d.amount, COALESCE(a.adj_factor, anchor.f, 1.0) AS adj_factor
+                   d.vol, d.amount, {factor_expr} AS adj_factor
             FROM bar_daily d
             LEFT JOIN bar_adj_factor a
               ON a.market = d.market AND a.symbol = d.symbol AND a.trade_date = d.trade_date
+              AND a.adj_factor > 0
             LEFT JOIN anchor ON 1 = 1
             WHERE d.market = ? AND d.symbol = ? AND d.trade_date BETWEEN ? AND ?
             ORDER BY d.trade_date LIMIT ?
@@ -436,6 +447,7 @@ class Repository:
             FROM bar_daily d
             LEFT JOIN bar_adj_factor a
               ON a.market = d.market AND a.symbol = d.symbol AND a.trade_date = d.trade_date
+              AND a.adj_factor > 0
             WHERE d.market = ? AND d.symbol = ? AND d.trade_date BETWEEN ? AND ?
             ORDER BY d.trade_date LIMIT ?
             """

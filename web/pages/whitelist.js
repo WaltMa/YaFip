@@ -89,6 +89,10 @@
     }
 
     function updateWhitelist() {
+      if (market !== "CN_A") {
+        antd.message.info("港美股无市值数据源，白名单需手工维护");
+        return;
+      }
       const threshold_wan = Number((ruleForm.getFieldValue && ruleForm.getFieldValue("value")) || 50) * 10000;
       Y.confirm(
         "更新白名单",
@@ -236,6 +240,8 @@
             <${antd.Button}
               type="primary"
               loading=${running}
+              disabled=${market !== "CN_A"}
+              title=${market !== "CN_A" ? "港美股无市值数据源，白名单需手工维护" : ""}
               onClick=${updateWhitelist}
             >
               更新白名单

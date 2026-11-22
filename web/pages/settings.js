@@ -7,19 +7,15 @@
 
   const FIELDS = [
     { key: "server.port", label: "服务端口", type: "number", min: 1, max: 65535, extra: "默认 8203；修改后需重启服务生效，环境变量 YAFIP_PORT 优先" },
-    { key: "server.stop_wait_sec", label: "停止等待上限（秒）", type: "number", min: 0, max: 86400, extra: "0 = 一直等待运行中的任务结束；大于 0 时超时强制退出" },
-    { key: "task.max_workers", label: "并发任务数", type: "number", min: 1, max: 64, extra: "修改后需重启服务生效（线程池在启动时创建）" },
+    { key: "server.stop_wait_sec", label: "停止等待上限（秒）", type: "number", min: 0, max: 86400, extra: "平滑停止（/system/stop）：0 = 一直等待运行中的任务结束，大于 0 超时强制退出；进程退出（Ctrl+C/重启）最多等待 5 秒兜底，超时未完成任务标记失败" },
+    { key: "task.max_concurrency", label: "并发任务数", type: "number", min: 1, max: 64, extra: "全局并发上限（信号量）；修改后需重启服务生效" },
+    { key: "task.cpu_ratio", label: "单任务 CPU 占空比", type: "number", min: 0.01, max: 1, extra: "每工作单元按 CPU 计量让出份额（IO 等待不计入）" },
+    { key: "task.cpu_budget_ratio", label: "全局 CPU 预算占比", type: "number", min: 0.01, max: 1, extra: "并发任务分摊预算的上限比例" },
     { key: "fetch.rpm", label: "tushare 数据接口限频（次/分钟）", type: "number", min: 1, max: 100000, extra: "daily / adj_factor / daily_basic 用；数据源配置里的 rpm_limit 优先" },
     { key: "fetch.meta_rpm", label: "元数据接口限频（次/分钟）", type: "number", min: 1, max: 100000, extra: "trade_cal / stock_basic 用；部分账号仅 1 次/分钟，超过会自动等待" },
     { key: "fetch.timeout_sec", label: "单次请求超时（秒）", type: "number", min: 1, max: 600 },
     { key: "fetch.retry_max", label: "失败重试次数", type: "number", min: 0, max: 20 },
     { key: "data.start_date", label: "历史起点", type: "text", pattern: "^\\d{4}-\\d{2}-\\d{2}$", patternMessage: "格式必须为 YYYY-MM-DD", extra: "格式 YYYY-MM-DD，全量抓取从这里开始" },
-    {
-      key: "data.include_delisted",
-      label: "包含退市股票",
-      type: "switch",
-      extra: "关闭会丢失 2010 至今全部退市股历史，不推荐",
-    },
     { key: "task.retention_days", label: "任务记录保留天数", type: "number", min: 1, max: 3650 },
     { key: "sse.heartbeat_sec", label: "SSE 心跳（秒）", type: "number", min: 1, max: 3600, extra: "下限 1 秒；写 0 会让心跳立即超时、SSE 无限空转" },
   ];
@@ -118,9 +114,8 @@
                 <${antd.Descriptions.Item} label="SSE 订阅">${health.data ? health.data.sse_subscribers : "-"}<//>
                 <${antd.Descriptions.Item} label="白名单">
                   ${health.data && health.data.whitelist
-                    ? health.data.whitelist.enabled
-                      ? "启用 · 入选 " + Y.fmt.num(health.data.whitelist.included)
-                      : "未启用"
+                    ? "明细 " + Y.fmt.num(health.data.whitelist.members || 0) + " 只" +
+                      (health.data.whitelist.as_of_date ? " · 市值日期 " + health.data.whitelist.as_of_date : "")
                     : "-"}
                 <//>
               <//>

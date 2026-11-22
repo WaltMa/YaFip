@@ -41,6 +41,7 @@ class DataService:
     ) -> str:
         spec = self.registry.validate_submission(task_type, executor, market, params)
         payload = dict(params or {})
+        payload["task_type"] = task_type
         payload["market"] = market
         payload["executor"] = executor  # executor 进入任务上下文，单元 manifest 记录真实执行器
         task_spec = TaskSpec(

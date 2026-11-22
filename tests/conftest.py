@@ -51,7 +51,7 @@ class FakeSource(DataSource):
                 rows.append({"exchange": "SSE", "cal_date": day, "is_open": 1, "pretrade_date": None})
         return pd.DataFrame(rows, columns=CALENDAR_COLUMNS)
 
-    def get_stock_list(self, market: str, include_delisted: bool = True) -> pd.DataFrame:
+    def get_stock_list(self, market: str) -> pd.DataFrame:
         return pd.DataFrame(
             [
                 {

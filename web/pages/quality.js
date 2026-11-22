@@ -67,11 +67,12 @@
         async function () {
           try {
             setRepairing(true);
+            const rangeExecutor = market === "CN_A" ? "tushare.bars.range" : "akshare.bars.range";
             const data = await Y.api("/tasks", {
               method: "POST",
               body: {
                 task_type: "bars.range",
-                executor: "tushare.bars.range",
+                executor: rangeExecutor,
                 market: market,
                 params: { start: dates.start, end: dates.end, symbols: symbols },
               },
